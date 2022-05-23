@@ -1,12 +1,5 @@
 <template>
   <div class="hello">
-    <input type="file" @change="changeFile" ref="input" v-show="false" />
-    <button @click="submit">
-      <span v-if="fileStatus === 'loading'">正在上传</span>
-      <span v-else-if="fileStatus === 'success'">上传成功</span>
-      <span v-else-if="fileStatus === 'error'">上传失败</span>
-      <span v-else-if="fileStatus === 'ready'">点击上传</span>
-    </button>
     <div style="margin-top: 10vh">
       <input
         type="file"
@@ -15,17 +8,11 @@
         v-show="false"
       />
       <button @click="submit">
-        <span v-if="fileStatus === 'loading'">正在上传</span>
-        <span v-else-if="fileStatus === 'success'">分片成功</span>
-        <span v-else-if="fileStatus === 'error'">上传失败</span>
-        <span v-else-if="fileStatus === 'ready'">分片上传</span>
+        <span>分片上传</span>
       </button>
-
-      <button @click="postMerge">合并分片</button>
-    </div>
-
-    <div class="file-list">
-      <slot />
+      <button @click="postMerge">
+        <span>合并分片</span>
+      </button>
     </div>
   </div>
 </template>
@@ -34,9 +21,6 @@
 import axios from "axios";
 export default {
   name: "HelloWorld",
-  props: {
-    msg: String,
-  },
   data() {
     return {
       inputFile: null,
@@ -44,35 +28,10 @@ export default {
     };
   },
   methods: {
-    async changeFile(e) {
-      try {
-        const target = e.target;
-        const files = target.files;
-        if (files) {
-          if (files[0] >= 1024 * 1024 * 2) return alert("文件大小不能大于2M");
-          this.fileStatus = "loading";
-          const uploadedFile = files[0];
-          // this.inputFile = files[0]
-          const formData = new FormData();
-          formData.append("file", uploadedFile, uploadedFile.name);
-          let data = await this.uploadFile(formData);
-          this.fileStatus = "success";
-          alert("上传成功");
-          console.log(data);
-        }
-      } catch {
-        this.fileStatus === "error";
-      }
-    },
-    submit() {
-      // let input = this.$refs.input;
-      let input = this.$refs.chunkFile;
-      input.click();
-      // console.log(this.$refs.input.files[0])
-    },
-    async uploadFile(formData, path = "/upload") {
-      let { data } = await axios.post(
-        "http://localhost:3000" + path,
+    uploadFile(formData, path = "/upload", contentHash) {
+      console.log(`http://localhost:3000${path}/${contentHash}`);
+      return axios.post(
+        `http://localhost:3000${path}/${contentHash}`,
         formData,
         {
           headers: {
@@ -80,22 +39,50 @@ export default {
           },
         }
       );
-      return data;
     },
     async changeChunkFile(e) {
       const target = e.target;
       const file = target.files[0];
-
+      const contentHash = await this.getContentHash(file);
+      const validateRes = await this.validateContentHash(contentHash);
+      if(validateRes.state == 1) return alert('秒传成功！')
+      if(validateRes.state == 2) alert(`开始续传，已有${validateRes.chunksIndexList.length}个分片`)
+      if(validateRes.state == 0) alert('开始上传')
       const fileChunkList = this.createFileChunk(file);
-      const formChunkList = fileChunkList.map((chunk, index) => {
-        const formData = new FormData();
-        formData.append("chunk", chunk.file);
-        formData.append("hash", `${index}-${chunk.hash}`);
-        return formData;
+      const formChunkList = [];
+      fileChunkList.forEach((chunk, index) => {
+        if (
+          validateRes.state == 0 ||
+          (validateRes.state == 2 &&
+            validateRes.chunksIndexList.indexOf(String(index)) < 0)
+        ) {
+          const formData = new FormData();
+          formData.append("chunk", chunk.file);
+          formData.append("hash", `${index}-${chunk.hash}`);
+          formChunkList.push(formData);
+        }
       });
-      console.log(formChunkList[0]);
-      await this.QPSLimit(formChunkList);
+      await this.QPSLimit(formChunkList, 2, contentHash);
+      await this.postMerge(contentHash);
       alert("分片上传成功");
+    },
+    // 获取文件md5
+    getContentHash(file) {
+      return new Promise((resolve) => {
+        const worker = new Worker("/content-hash.js");
+        worker.postMessage({ file });
+        worker.onmessage = (e) => {
+          const { contentHash } = e.data;
+          if (contentHash) resolve(contentHash);
+        };
+      });
+    },
+    // 验证hash
+    async validateContentHash(contentHash) {
+      let { data } = await axios.post("http://localhost:3000/hash", {
+        contentHash,
+      });
+      return data;
     },
     // 创建切片
     createFileChunk(file, size = 100) {
@@ -112,35 +99,33 @@ export default {
     },
 
     //并发控制
-    QPSLimit(chunkPool, limit = 2) {
+    QPSLimit(chunkPool, limit = 2, contentHash) {
       return new Promise((resolve) => {
         let pool = [];
         const add = () => {
           if (pool.length < limit && chunkPool.length) {
-            pool.push(this.uploadFile(chunkPool.shift(), "/chunk"));
+            let p = this.uploadFile(
+              chunkPool.shift(),
+              "/chunk",
+              contentHash
+            ).then(() => {
+              pool.splice(pool.indexOf(p), 1);
+              if (pool.length === 0) return resolve();
+              add();
+            });
+            pool.push(p);
           }
         };
-
         while (pool.length < limit && chunkPool.length) {
           add();
         }
-
-        function run() {
-          if (!pool.length) return resolve();
-          Promise.race(pool).then((finished) => {
-            pool.splice(pool.indexOf(finished), 1);
-            add();
-            run();
-          });
-        }
-        run();
       });
     },
-
     // postMerge
-    async postMerge() {
-      await axios.post('http://localhost:3000/merge')
-    }
+    async postMerge(contentHash) {
+      console.log("merge");
+      await axios.post(`http://localhost:3000/merge/${contentHash}`);
+    },
   },
 };
 </script>
