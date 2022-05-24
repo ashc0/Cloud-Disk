@@ -10,9 +10,6 @@
       <button @click="submit">
         <span>分片上传</span>
       </button>
-      <button @click="postMerge">
-        <span>合并分片</span>
-      </button>
     </div>
   </div>
 </template>
@@ -20,7 +17,6 @@
 <script>
 import axios from "axios";
 export default {
-  name: "HelloWorld",
   data() {
     return {
       inputFile: null,
@@ -28,6 +24,9 @@ export default {
     };
   },
   methods: {
+    submit(){
+      this.$refs.chunkFile.click()
+    },
     uploadFile(formData, path = "/upload", contentHash) {
       console.log(`http://localhost:3000${path}/${contentHash}`);
       return axios.post(
